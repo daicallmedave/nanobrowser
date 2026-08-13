@@ -281,13 +281,16 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       return new ChatDeepSeek(args) as BaseChatModel;
     }
     case ProviderTypeEnum.Gemini: {
-      const args = {
+      return new ChatOpenAI({
         model: modelConfig.modelName,
         apiKey: providerConfig.apiKey,
         temperature,
         topP,
-      };
-      return new ChatGoogleGenerativeAI(args);
+        maxTokens,
+        configuration: {
+          baseURL: providerConfig.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        },
+      });
     }
     case ProviderTypeEnum.Grok: {
       const args = {
