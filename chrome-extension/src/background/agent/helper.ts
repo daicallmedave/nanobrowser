@@ -340,14 +340,19 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       };
       return new ChatDeepSeek(args) as BaseChatModel;
     }
-    case ProviderTypeEnum.Gemini: {
-      const args = {
+   case ProviderTypeEnum.Gemini: {
+      const instance = new ChatGoogleGenerativeAI({
         model: modelConfig.modelName,
         apiKey: providerConfig.apiKey,
         temperature,
         topP,
-      };
-      return new ChatGoogleGenerativeAI(args);
+      });
+      // Override LangChain's internal multimodal check so newer 2.x/3.x/Flash strings are recognized as supporting images
+      Object.defineProperty(instance, 'isMultimodalModel', {
+        get: () => true,
+        configurable: true,
+      });
+      return instance;
     }
     case ProviderTypeEnum.Grok: {
       const args = {
