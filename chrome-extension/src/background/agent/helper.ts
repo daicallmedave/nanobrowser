@@ -9,8 +9,19 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { ChatOllama } from '@langchain/ollama';
 import { ChatDeepSeek } from '@langchain/deepseek';
 
-// Intercept fetch calls to promote AQ. keys from URL query parameters to headers,
-// cleanly preserving the POST method and screenshot body for vision payloads.
+// 1. CLASS PROTOTYPE OVERRIDE
+// Forces LangChain's client library to allow image/screenshot payloads for ALL 
+// ChatGoogleGenerativeAI objects (including bound wrappers from .withStructuredOutput()).
+Object.defineProperty(ChatGoogleGenerativeAI.prototype, 'isMultimodalModel', {
+  get() {
+    return true;
+  },
+  configurable: true,
+});
+
+// 2. FETCH INTERCEPTOR
+// Promotes AQ. keys from URL query parameters to HTTP headers while cleanly
+// preserving POST methods and screenshot payload bodies.
 if (typeof globalThis.fetch === 'function' && !(globalThis.fetch as any).__geminiKeyPatched) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
@@ -80,15 +91,11 @@ class ChatLlama extends ChatOpenAI {
     super(args);
   }
 
-  // Override the completionWithRetry method to intercept and transform the response
   async completionWithRetry(request: any, options?: any): Promise<any> {
     try {
-      // Make the request using the parent's implementation
       const response = await super.completionWithRetry(request, options);
 
-      // Check if this is a Llama API response format
       if (response?.completion_message?.content?.text) {
-        // Transform Llama API response to OpenAI format
         const transformedResponse = {
           id: response.id || 'llama-response',
           object: 'chat.completion',
@@ -134,37 +141,14 @@ function isOpenAIReasoningModel(modelName: string): boolean {
   );
 }
 
-// Function to check if a model is an Anthropic Opus model
-function isAnthropicOpusModel(modelName: string): boolean {
-  // Extract the model name without provider prefix if present
-  let modelNameWithoutProvider = modelName;
-  if (modelName.startsWith('anthropic/')) {
-    modelNameWithoutProvider = modelName.substring(10);
-  }
-  return modelNameWithoutProvider.startsWith('claude-opus');
-}
-
-// check if a model is sonnet-4-5 or haiku-4-5
-function isAnthropic4_5Model(modelName: string): boolean {
-  let modelNameWithoutProvider = modelName;
-  if (modelName.startsWith('anthropic/')) {
-    modelNameWithoutProvider = modelName.substring(10);
-  }
-  return (
-    modelNameWithoutProvider.startsWith('claude-sonnet-4-5') || modelNameWithoutProvider.startsWith('claude-haiku-4-5')
-  );
-}
-
 function createOpenAIChatModel(
   providerConfig: ProviderConfig,
   modelConfig: ModelConfig,
-  // Add optional extra fetch options for headers etc.
   extraFetchOptions: { headers?: Record<string, string> } | undefined,
 ): BaseChatModel {
   const args: {
     model: string;
     apiKey?: string;
-    // Configuration should align with ClientOptions from @langchain/openai
     configuration?: Record<string, unknown>;
     modelKwargs?: {
       max_completion_tokens: number;
@@ -187,20 +171,16 @@ function createOpenAIChatModel(
   }
   args.configuration = configuration;
 
-  // custom provider may have no api key
   if (providerConfig.apiKey) {
     args.apiKey = providerConfig.apiKey;
   }
 
-  // O series models have different parameters
   if (isOpenAIReasoningModel(modelConfig.modelName)) {
     args.modelKwargs = {
       max_completion_tokens: maxTokens,
     };
 
-    // Add reasoning_effort parameter for o-series models if specified
     if (modelConfig.reasoningEffort) {
-      // if it's gpt-5.1, we need to convert minimal to none, it doesn't support minimal
       if (modelConfig.modelName.includes('gpt-5.1') && modelConfig.reasoningEffort === 'minimal') {
         args.modelKwargs.reasoning_effort = 'none';
       } else {
@@ -215,12 +195,10 @@ function createOpenAIChatModel(
   return new ChatOpenAI(args);
 }
 
-// Function to extract instance name from Azure endpoint URL
 function extractInstanceNameFromUrl(url: string): string | null {
   try {
     const parsedUrl = new URL(url);
     const hostnameParts = parsedUrl.hostname.split('.');
-    // Expecting format like instance-name.openai.azure.com
     if (hostnameParts.length >= 4 && hostnameParts[1] === 'openai' && hostnameParts[2] === 'azure') {
       return hostnameParts[0];
     }
@@ -230,17 +208,14 @@ function extractInstanceNameFromUrl(url: string): string | null {
   return null;
 }
 
-// Function to check if a provider ID is an Azure provider
 function isAzureProvider(providerId: string): boolean {
   return providerId === ProviderTypeEnum.AzureOpenAI || providerId.startsWith(`${ProviderTypeEnum.AzureOpenAI}_`);
 }
 
-// Function to create an Azure OpenAI chat model
 function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: ModelConfig): BaseChatModel {
   const temperature = (modelConfig.parameters?.temperature ?? 0.1) as number;
   const topP = (modelConfig.parameters?.topP ?? 0.1) as number;
 
-  // Validate necessary fields first
   if (
     !providerConfig.baseUrl ||
     !providerConfig.azureDeploymentNames ||
@@ -253,43 +228,33 @@ function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: Model
     );
   }
 
-  // Instead of always using the first deployment name, use the model name from modelConfig
-  // which contains the actual model selected in the UI
   const deploymentName = modelConfig.modelName;
 
-  // Validate that the selected model exists in the configured deployments
   if (!providerConfig.azureDeploymentNames.includes(deploymentName)) {
     console.warn(
-      `[createChatModel] Selected deployment "${deploymentName}" not found in available deployments. ` +
-        `Available: ${JSON.stringify(providerConfig.azureDeploymentNames)}. Using the model anyway.`,
+      `[createChatModel] Selected deployment "${deploymentName}" not found in available deployments. Using the model anyway.`,
     );
   }
 
-  // Extract instance name from the endpoint URL
   const instanceName = extractInstanceNameFromUrl(providerConfig.baseUrl);
   if (!instanceName) {
     throw new Error(
-      `Could not extract Instance Name from Azure Endpoint URL: ${providerConfig.baseUrl}. Expected format like https://<your-instance-name>.openai.azure.com/`,
+      `Could not extract Instance Name from Azure Endpoint URL: ${providerConfig.baseUrl}.`,
     );
   }
 
-  // Check if the Azure deployment is using an "o" series model (GPT-4o, etc.)
   const isOSeriesModel = isOpenAIReasoningModel(deploymentName);
 
-  // Use AzureChatOpenAI with specific parameters
   const args = {
-    azureOpenAIApiInstanceName: instanceName, // Derived from endpoint
+    azureOpenAIApiInstanceName: instanceName,
     azureOpenAIApiDeploymentName: deploymentName,
     azureOpenAIApiKey: providerConfig.apiKey,
     azureOpenAIApiVersion: providerConfig.azureApiVersion,
-    // For Azure, the model name should be the deployment name itself
-    model: deploymentName, // Set model = deployment name to fix Azure requests
-    // For O series models, use modelKwargs instead of temperature/topP
+    model: deploymentName,
     ...(isOSeriesModel
       ? {
           modelKwargs: {
             max_completion_tokens: maxTokens,
-            // Add reasoning_effort parameter for Azure o-series models if specified
             ...(modelConfig.reasoningEffort ? { reasoning_effort: modelConfig.reasoningEffort } : {}),
           },
         }
@@ -298,27 +263,22 @@ function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: Model
           topP,
           maxTokens,
         }),
-    // DO NOT pass baseUrl or configuration here
   };
   return new AzureChatOpenAI(args);
 }
 
-// create a chat model based on the agent name, the model name and provider
 export function createChatModel(providerConfig: ProviderConfig, modelConfig: ModelConfig): BaseChatModel {
   const temperature = (modelConfig.parameters?.temperature ?? 0.1) as number;
   const topP = (modelConfig.parameters?.topP ?? 0.1) as number;
 
-  // Check if the provider is an Azure provider with a custom ID (e.g. azure_openai_2)
   const isAzure = isAzureProvider(modelConfig.provider);
 
-  // If this is any type of Azure provider, handle it with the dedicated function
   if (isAzure) {
     return createAzureChatModel(providerConfig, modelConfig);
   }
 
   switch (modelConfig.provider) {
     case ProviderTypeEnum.OpenAI: {
-      // Call helper without extra options
       return createOpenAIChatModel(providerConfig, modelConfig, undefined);
     }
     case ProviderTypeEnum.Anthropic: {
@@ -340,19 +300,14 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       };
       return new ChatDeepSeek(args) as BaseChatModel;
     }
-   case ProviderTypeEnum.Gemini: {
-      const instance = new ChatGoogleGenerativeAI({
+    case ProviderTypeEnum.Gemini: {
+      const args = {
         model: modelConfig.modelName,
         apiKey: providerConfig.apiKey,
         temperature,
         topP,
-      });
-      // Override LangChain's internal multimodal check so newer 2.x/3.x/Flash strings are recognized as supporting images
-      Object.defineProperty(instance, 'isMultimodalModel', {
-        get: () => true,
-        configurable: true,
-      });
-      return instance;
+      };
+      return new ChatGoogleGenerativeAI(args);
     }
     case ProviderTypeEnum.Grok: {
       const args = {
