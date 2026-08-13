@@ -9,30 +9,63 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { ChatOllama } from '@langchain/ollama';
 import { ChatDeepSeek } from '@langchain/deepseek';
 
-// Intercept fetch calls to promote AQ. keys from URL query parameters to headers
+// Intercept fetch calls to promote AQ. keys from URL query parameters to headers,
+// cleanly preserving the POST method and screenshot body for vision payloads.
 if (typeof globalThis.fetch === 'function' && !(globalThis.fetch as any).__geminiKeyPatched) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
-    let url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    try {
+      if (input instanceof Request) {
+        const url = input.url;
+        if (url.includes('generativelanguage.googleapis.com') && url.includes('key=AQ.')) {
+          const match = url.match(/[?&]key=(AQ\.[^&]+)/);
+          if (match) {
+            const aqKey = match[1];
+            const cleanUrl = url
+              .replace(/([?&])key=AQ\.[^&]*(&|$)/, '$1')
+              .replace(/[?&]$/, '')
+              .replace(/\?&/, '?');
 
-    if (typeof url === 'string' && url.includes('generativelanguage.googleapis.com') && url.includes('key=AQ.')) {
-      try {
-        const parsedUrl = new URL(url);
-        const aqKey = parsedUrl.searchParams.get('key');
-        if (aqKey) {
-          parsedUrl.searchParams.delete('key');
-          url = parsedUrl.toString();
+            const newHeaders = new Headers(input.headers);
+            newHeaders.set('x-goog-api-key', aqKey);
+            newHeaders.set('Authorization', `Bearer ${aqKey}`);
 
-          const headers = new Headers(init?.headers);
-          headers.set('x-goog-api-key', aqKey);
-          headers.set('Authorization', `Bearer ${aqKey}`);
-
-          init = { ...init, headers };
-          input = typeof input !== 'string' && !(input instanceof URL) ? new Request(url, init) : url;
+            input = new Request(cleanUrl, {
+              method: input.method,
+              headers: newHeaders,
+              body: input.body,
+              mode: input.mode,
+              credentials: input.credentials,
+              cache: input.cache,
+              redirect: input.redirect,
+              referrer: input.referrer,
+              signal: input.signal,
+              duplex: 'half' as any,
+            });
+          }
         }
-      } catch (e) {
-        console.error('[Gemini Patch Error]', e);
+      } else {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('generativelanguage.googleapis.com') && urlStr.includes('key=AQ.')) {
+          const match = urlStr.match(/[?&]key=(AQ\.[^&]+)/);
+          if (match) {
+            const aqKey = match[1];
+            const cleanUrl = urlStr
+              .replace(/([?&])key=AQ\.[^&]*(&|$)/, '$1')
+              .replace(/[?&]$/, '')
+              .replace(/\?&/, '?');
+            input = cleanUrl;
+
+            const headers = new Headers(init?.headers);
+            headers.set('x-goog-api-key', aqKey);
+            headers.set('Authorization', `Bearer ${aqKey}`);
+
+            init = { ...init, headers };
+          }
+        }
       }
+    } catch (e) {
+      console.error('[Gemini Patch Error]', e);
     }
     return originalFetch(input, init);
   };
@@ -267,7 +300,6 @@ function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: Model
         }),
     // DO NOT pass baseUrl or configuration here
   };
-  // console.log('[createChatModel] Azure args passed to AzureChatOpenAI:', args);
   return new AzureChatOpenAI(args);
 }
 
@@ -290,8 +322,6 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       return createOpenAIChatModel(providerConfig, modelConfig, undefined);
     }
     case ProviderTypeEnum.Anthropic: {
-      // For Opus models, only support temperature, not topP
-      // For 4.5 models, only support either temperature or topP, not both, so we only use temperature to align with Opus
       const args = {
         model: modelConfig.modelName,
         apiKey: providerConfig.apiKey,
@@ -362,23 +392,16 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
         numCtx: number;
       } = {
         model: modelConfig.modelName,
-        // required but ignored by ollama
         apiKey: providerConfig.apiKey === '' ? 'ollama' : providerConfig.apiKey,
         baseUrl: providerConfig.baseUrl ?? 'http://localhost:11434',
         topP,
         temperature,
         maxTokens,
-        // ollama usually has a very small context window, so we need to set a large number for agent to work
-        // It was set to 128000 in the original code, but it will cause ollama reload the models frequently if you have multiple models working together
-        // not sure why, but setting it to 64000 seems to work fine
-        // TODO: configure the context window size in model config
         numCtx: 64000,
       };
       return new ChatOllama(args);
     }
     case ProviderTypeEnum.OpenRouter: {
-      // Call the helper function, passing OpenRouter headers via the third argument
-      console.log('[createChatModel] Calling createOpenAIChatModel for OpenRouter');
       return createOpenAIChatModel(providerConfig, modelConfig, {
         headers: {
           'HTTP-Referer': 'https://nanobrowser.ai',
@@ -387,7 +410,6 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       });
     }
     case ProviderTypeEnum.Llama: {
-      // Llama API has a different response format, use custom ChatLlama class
       const args: {
         model: string;
         apiKey?: string;
@@ -412,8 +434,6 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       return new ChatLlama(args);
     }
     default: {
-      // by default, we think it's a openai-compatible provider
-      // Pass undefined for extraFetchOptions for default/custom cases
       return createOpenAIChatModel(providerConfig, modelConfig, undefined);
     }
   }
