@@ -9,19 +9,30 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { ChatOllama } from '@langchain/ollama';
 import { ChatDeepSeek } from '@langchain/deepseek';
 
-// 1. CLASS PROTOTYPE OVERRIDE
-// Forces LangChain's client library to allow image/screenshot payloads for ALL 
-// ChatGoogleGenerativeAI objects (including bound wrappers from .withStructuredOutput()).
-Object.defineProperty(ChatGoogleGenerativeAI.prototype, 'isMultimodalModel', {
-  get() {
-    return true;
-  },
-  configurable: true,
-});
+// 1. LANGCHAIN MULTIMODAL PROTOTYPE PATCH
+// Overrides both internal getters (_isMultimodalModel and isMultimodalModel) on the 
+// ChatGoogleGenerativeAI class prototype. This forces LangChain JS to permit screenshot/image
+// payloads for ALL Gemini models (including gemini-3.1-flash-lite) during structured output calls.
+try {
+  Object.defineProperty(ChatGoogleGenerativeAI.prototype, '_isMultimodalModel', {
+    get() {
+      return true;
+    },
+    configurable: true,
+  });
+  Object.defineProperty(ChatGoogleGenerativeAI.prototype, 'isMultimodalModel', {
+    get() {
+      return true;
+    },
+    configurable: true,
+  });
+} catch (e) {
+  console.error('[Gemini Vision Prototype Patch Error]', e);
+}
 
-// 2. FETCH INTERCEPTOR
-// Promotes AQ. keys from URL query parameters to HTTP headers while cleanly
-// preserving POST methods and screenshot payload bodies.
+// 2. AQ. KEY & POST BODY FETCH INTERCEPTOR
+// Converts key=AQ. from URL query parameters into x-goog-api-key and Authorization HTTP headers.
+// Safely preserves Request HTTP methods, headers, and image POST bodies for vision payloads.
 if (typeof globalThis.fetch === 'function' && !(globalThis.fetch as any).__geminiKeyPatched) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
@@ -76,7 +87,7 @@ if (typeof globalThis.fetch === 'function' && !(globalThis.fetch as any).__gemin
         }
       }
     } catch (e) {
-      console.error('[Gemini Patch Error]', e);
+      console.error('[Gemini Fetch Patch Error]', e);
     }
     return originalFetch(input, init);
   };
@@ -91,6 +102,7 @@ class ChatLlama extends ChatOpenAI {
     super(args);
   }
 
+  // Override the completionWithRetry method to intercept and transform the response
   async completionWithRetry(request: any, options?: any): Promise<any> {
     try {
       const response = await super.completionWithRetry(request, options);
@@ -138,6 +150,26 @@ function isOpenAIReasoningModel(modelName: string): boolean {
   return (
     modelNameWithoutProvider.startsWith('o') ||
     (modelNameWithoutProvider.startsWith('gpt-5') && !modelNameWithoutProvider.startsWith('gpt-5-chat'))
+  );
+}
+
+// Function to check if a model is an Anthropic Opus model
+function isAnthropicOpusModel(modelName: string): boolean {
+  let modelNameWithoutProvider = modelName;
+  if (modelName.startsWith('anthropic/')) {
+    modelNameWithoutProvider = modelName.substring(10);
+  }
+  return modelNameWithoutProvider.startsWith('claude-opus');
+}
+
+// check if a model is sonnet-4-5 or haiku-4-5
+function isAnthropic4_5Model(modelName: string): boolean {
+  let modelNameWithoutProvider = modelName;
+  if (modelName.startsWith('anthropic/')) {
+    modelNameWithoutProvider = modelName.substring(10);
+  }
+  return (
+    modelNameWithoutProvider.startsWith('claude-sonnet-4-5') || modelNameWithoutProvider.startsWith('claude-haiku-4-5')
   );
 }
 
@@ -195,6 +227,7 @@ function createOpenAIChatModel(
   return new ChatOpenAI(args);
 }
 
+// Function to extract instance name from Azure endpoint URL
 function extractInstanceNameFromUrl(url: string): string | null {
   try {
     const parsedUrl = new URL(url);
@@ -208,10 +241,12 @@ function extractInstanceNameFromUrl(url: string): string | null {
   return null;
 }
 
+// Function to check if a provider ID is an Azure provider
 function isAzureProvider(providerId: string): boolean {
   return providerId === ProviderTypeEnum.AzureOpenAI || providerId.startsWith(`${ProviderTypeEnum.AzureOpenAI}_`);
 }
 
+// Function to create an Azure OpenAI chat model
 function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: ModelConfig): BaseChatModel {
   const temperature = (modelConfig.parameters?.temperature ?? 0.1) as number;
   const topP = (modelConfig.parameters?.topP ?? 0.1) as number;
@@ -267,6 +302,7 @@ function createAzureChatModel(providerConfig: ProviderConfig, modelConfig: Model
   return new AzureChatOpenAI(args);
 }
 
+// create a chat model based on the agent name, the model name and provider
 export function createChatModel(providerConfig: ProviderConfig, modelConfig: ModelConfig): BaseChatModel {
   const temperature = (modelConfig.parameters?.temperature ?? 0.1) as number;
   const topP = (modelConfig.parameters?.topP ?? 0.1) as number;
