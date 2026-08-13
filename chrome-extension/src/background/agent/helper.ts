@@ -9,6 +9,36 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { ChatOllama } from '@langchain/ollama';
 import { ChatDeepSeek } from '@langchain/deepseek';
 
+// Intercept fetch calls to promote AQ. keys from URL query parameters to headers
+if (typeof globalThis.fetch === 'function' && !(globalThis.fetch as any).__geminiKeyPatched) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+    let url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (typeof url === 'string' && url.includes('generativelanguage.googleapis.com') && url.includes('key=AQ.')) {
+      try {
+        const parsedUrl = new URL(url);
+        const aqKey = parsedUrl.searchParams.get('key');
+        if (aqKey) {
+          parsedUrl.searchParams.delete('key');
+          url = parsedUrl.toString();
+
+          const headers = new Headers(init?.headers);
+          headers.set('x-goog-api-key', aqKey);
+          headers.set('Authorization', `Bearer ${aqKey}`);
+
+          init = { ...init, headers };
+          input = typeof input !== 'string' && !(input instanceof URL) ? new Request(url, init) : url;
+        }
+      } catch (e) {
+        console.error('[Gemini Patch Error]', e);
+      }
+    }
+    return originalFetch(input, init);
+  };
+  (globalThis.fetch as any).__geminiKeyPatched = true;
+}
+
 const maxTokens = 1024 * 4;
 
 // Custom ChatLlama class to handle Llama API response format
@@ -281,16 +311,13 @@ export function createChatModel(providerConfig: ProviderConfig, modelConfig: Mod
       return new ChatDeepSeek(args) as BaseChatModel;
     }
     case ProviderTypeEnum.Gemini: {
-      return new ChatOpenAI({
+      const args = {
         model: modelConfig.modelName,
         apiKey: providerConfig.apiKey,
         temperature,
         topP,
-        maxTokens,
-        configuration: {
-          baseURL: providerConfig.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai/',
-        },
-      });
+      };
+      return new ChatGoogleGenerativeAI(args);
     }
     case ProviderTypeEnum.Grok: {
       const args = {
